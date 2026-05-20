@@ -61,6 +61,9 @@ class LocalWebServer(
             val errorUrl = "error://404?path=$relativePath"
             val response = newFixedLengthResponse(Response.Status.REDIRECT, "text/plain", "")
             response.addHeader("Location", errorUrl)
+            response.addHeader("Cache-Control", "no-cache, no-store, must-revalidate")
+            response.addHeader("Pragma", "no-cache")
+            response.addHeader("Expires", "0")
             return response
         }
 
@@ -70,6 +73,9 @@ class LocalWebServer(
             val errorUrl = "error://403?path=$relativePath"
             val response = newFixedLengthResponse(Response.Status.REDIRECT, "text/plain", "")
             response.addHeader("Location", errorUrl)
+            response.addHeader("Cache-Control", "no-cache, no-store, must-revalidate")
+            response.addHeader("Pragma", "no-cache")
+            response.addHeader("Expires", "0")
             return response
         }
 

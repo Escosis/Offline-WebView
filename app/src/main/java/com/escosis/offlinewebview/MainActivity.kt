@@ -42,6 +42,7 @@ import org.mozilla.geckoview.GeckoResult
 import org.mozilla.geckoview.GeckoRuntime
 import org.mozilla.geckoview.GeckoSession
 import org.mozilla.geckoview.GeckoView
+import androidx.appcompat.app.AlertDialog
 
 class MainActivity : AppCompatActivity(), DebugLogger {
 
@@ -362,7 +363,7 @@ class MainActivity : AppCompatActivity(), DebugLogger {
                 val initialEnabled = when (text) {
                     "夜间模式" -> isNightMode
                     "自动隐藏" -> isAutoHideEnabled
-                    "自动旋转" -> isOrientationAllowed
+                    "允许旋转" -> isOrientationAllowed
                     else -> false
                 }
                 val textColor = if (initialEnabled) {
@@ -386,7 +387,7 @@ class MainActivity : AppCompatActivity(), DebugLogger {
                     val newEnabled = when (text) {
                         "夜间模式" -> isNightMode
                         "自动隐藏" -> isAutoHideEnabled
-                        "自动旋转" -> isOrientationAllowed
+                        "允许旋转" -> isOrientationAllowed
                         else -> false
                     }
                     imageView.setColorFilter(getIconColor(newEnabled))
@@ -470,9 +471,9 @@ class MainActivity : AppCompatActivity(), DebugLogger {
         (autoHideItem as? LinearLayout)?.getChildAt(0)?.tag = "auto_hide"
         popupView.addView(autoHideItem)
 
-        // 自动旋转
+        // 允许旋转
         val rotateItem = createOptionItem(
-            R.drawable.mobile_rotate_24, "自动旋转",
+            R.drawable.mobile_rotate_24, "允许旋转",
             isEnabled = isOrientationAllowed,
             isToggle = true
         ) {
@@ -688,8 +689,12 @@ class MainActivity : AppCompatActivity(), DebugLogger {
             resetHideTimer()
         }
         selectDirButton.setOnClickListener {
-            log("打开文件夹选择器")
-            openFolderPicker()
+            if (isServerStarted && rootUri != null) {
+                showStopServerDialog()
+            } else {
+                log("打开文件夹选择器")
+                openFolderPicker()
+            }
             resetHideTimer()
         }
         selectFileButton.setOnClickListener {
@@ -724,8 +729,9 @@ class MainActivity : AppCompatActivity(), DebugLogger {
     }
 
     private fun updateNavigationButtonsState() {
-        backButton.isEnabled = canGoBack
-        forwardButton.isEnabled = canGoForward
+        backButton.isEnabled = isServerStarted && canGoBack
+        forwardButton.isEnabled = isServerStarted && canGoForward
+        refreshButton.isEnabled = isServerStarted
         applyNightMode()
     }
 
@@ -758,6 +764,7 @@ class MainActivity : AppCompatActivity(), DebugLogger {
             server.start()
             localWebServer = server
             isServerStarted = true
+            geckoSession.purgeHistory()
             log("服务器启动成功，端口 8080")
         } catch (e: Exception) {
             log("服务器启动失败: ${e.message}")
@@ -896,21 +903,16 @@ class MainActivity : AppCompatActivity(), DebugLogger {
             setNavigationBarColor(Color.WHITE)
         }
 
-        setIconColor(backButton, if (canGoBack) normalIconColor else disabledColor)
-        setIconColor(forwardButton, if (canGoForward) normalIconColor else disabledColor)
-        setIconColor(refreshButton, normalIconColor)
+        setIconColor(backButton, if (backButton.isEnabled) normalIconColor else disabledColor)
+        setIconColor(forwardButton, if (forwardButton.isEnabled) normalIconColor else disabledColor)
+        setIconColor(refreshButton, if (refreshButton.isEnabled) normalIconColor else disabledColor)
+        setIconColor(selectFileButton, if (selectFileButton.isEnabled) normalIconColor else disabledColor)
         setIconColor(goButton, normalIconColor)
 
         if (isServerStarted) {
             selectDirButton.setColorFilter(Color.rgb(0, 75, 171), PorterDuff.Mode.SRC_IN)
         } else {
             setIconColor(selectDirButton, normalIconColor)
-        }
-
-        if (selectFileButton.isEnabled) {
-            setIconColor(selectFileButton, normalIconColor)
-        } else {
-            setIconColor(selectFileButton, disabledColor)
         }
 
         // 设置菜单按钮颜色（深色模式下白色，日间模式下深灰色）
@@ -1264,5 +1266,37 @@ class MainActivity : AppCompatActivity(), DebugLogger {
     override fun onResume() {
         super.onResume()
         resetHideTimer()
+    }
+
+    private fun showStopServerDialog() {
+        AlertDialog.Builder(this)
+            .setTitle("停止服务器")
+            .setMessage("当前服务器正在运行，是否停止并重新选择目录？")
+            .setPositiveButton("停止") { _, _ ->
+                log("用户确认停止服务器")
+                stopServerAndReset()
+            }
+            .setNegativeButton("取消") { dialog, _ ->
+                log("用户取消停止服务器")
+                dialog.dismiss()
+            }
+            .setCancelable(true)
+            .show()
+    }
+
+    private fun stopServerAndReset() {
+        localWebServer?.stop()
+        localWebServer = null
+        isServerStarted = false
+        rootUri = null
+        geckoSession.loadUri("about:blank")
+        geckoSession.purgeHistory()
+        updateUIAfterDirSelected()
+        canGoBack = false
+        canGoForward = false
+        updateNavigationButtonsState()
+        urlEditText.setText("")
+        urlEditText.hint = "请先选择服务器根目录"
+        log("服务器已停止，界面已重置")
     }
 }
