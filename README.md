@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./docs/logo.png" alt="Offline WebView Logo" width="200">
+  <img src="./icon.png" alt="Offline WebView Logo" width="200">
 </p>
 
 **Note: The code in this project was written by DeepSeek. It may contain various comments and unused code snippets, but these do not affect the final functionality.**
