@@ -46,6 +46,8 @@ import org.mozilla.geckoview.GeckoSession
 import org.mozilla.geckoview.GeckoView
 import java.io.File
 import java.util.zip.ZipInputStream
+import org.apache.commons.compress.archivers.zip.ZipArchiveInputStream
+import java.nio.charset.Charset
 
 class MainActivity : AppCompatActivity(), DebugLogger {
 
@@ -826,32 +828,64 @@ class MainActivity : AppCompatActivity(), DebugLogger {
             setCancelable(false)
             show()
         }
+
         Thread {
+            var zipStream: ZipArchiveInputStream? = null
             try {
                 cleanupUnzippedDir()
                 unzippedDir.mkdirs()
 
-                contentResolver.openInputStream(zipUri)?.use { inputStream ->
-                    ZipInputStream(inputStream).use { zipStream ->
-                        var entry = zipStream.nextEntry
+                val inputStream = contentResolver.openInputStream(zipUri)
+                    ?: throw Exception("无法打开 ZIP 文件流")
+
+                // 定义尝试的编码列表：优先 GBK（中文 Windows 常用），其次 UTF-8
+                val encodings = listOf("GBK", "UTF-8")
+
+                var lastException: Exception? = null
+                var success = false
+
+                for (encodingName in encodings) {
+                    if (success) break
+                    try {
+                        // 重新打开流（因为一次解压会消耗流）
+                        val freshStream = contentResolver.openInputStream(zipUri)
+                            ?: throw Exception("重新打开文件流失败")
+                        zipStream = ZipArchiveInputStream(freshStream, encodingName, true)
+
+                        var entry = zipStream.nextZipEntry
                         while (entry != null) {
-                            val targetFile = File(unzippedDir, entry.name)
+                            val entryName = entry.name.replace('\\', '/')
+                            val targetFile = File(unzippedDir, entryName)
+
                             if (entry.isDirectory) {
                                 targetFile.mkdirs()
                             } else {
                                 targetFile.parentFile?.mkdirs()
-                                targetFile.outputStream().use { out ->
-                                    zipStream.copyTo(out)
+                                targetFile.outputStream().use { output ->
+                                    zipStream.copyTo(output)  // 流式复制，不占额外内存
                                 }
                             }
-                            zipStream.closeEntry()
-                            entry = zipStream.nextEntry
+                            entry = zipStream.nextZipEntry
                         }
+                        success = true
+                        log("解压成功，编码：$encodingName")
+                    } catch (e: Exception) {
+                        lastException = e
+                        log("使用编码 $encodingName 解压失败：${e.message}")
+                        // 清理已解压的内容，尝试下一种编码
+                        cleanupUnzippedDir()
+                        unzippedDir.mkdirs()
+                    } finally {
+                        zipStream?.close()
                     }
                 }
+
+                if (!success) {
+                    throw lastException ?: Exception("所有编码尝试均失败")
+                }
+
                 runOnUiThread {
                     progressDialog.dismiss()
-                    // 解压成功，启动新服务器
                     PrivateDirDocumentsProvider.setRootDirectory(unzippedDir)
                     startServerFromFile(unzippedDir)
                 }
@@ -860,7 +894,7 @@ class MainActivity : AppCompatActivity(), DebugLogger {
                 runOnUiThread {
                     progressDialog.dismiss()
                     Toast.makeText(this, "解压失败: ${e.message}", Toast.LENGTH_LONG).show()
-                    unzippedDir.deleteRecursively()
+                    cleanupUnzippedDir()
                 }
             }
         }.start()
