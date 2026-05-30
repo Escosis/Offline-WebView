@@ -44,11 +44,8 @@ import org.mozilla.geckoview.GeckoRuntime
 import org.mozilla.geckoview.GeckoSession
 import org.mozilla.geckoview.GeckoView
 import java.io.File
-import java.util.zip.ZipInputStream
 import org.apache.commons.compress.archivers.zip.ZipArchiveInputStream
-import java.nio.charset.Charset
 import androidx.core.content.ContextCompat
-import android.widget.Button
 import androidx.activity.OnBackPressedCallback
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
@@ -60,7 +57,7 @@ import java.util.Locale
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
-import kotlin.coroutines.CoroutineContext
+import android.view.ViewTreeObserver
 
 class MainActivity : AppCompatActivity(), DebugLogger {
 
@@ -156,6 +153,23 @@ class MainActivity : AppCompatActivity(), DebugLogger {
 
     private var pendingReferenceInstance: Instance? = null
     private var currentInstanceRootDir: File? = null
+
+    private var currentFileBrowserDialog: AlertDialog? = null
+    private var currentBrowserRoot: File? = null
+    private var currentBrowserCurrentDir: File? = null
+
+    // 文件类型处理策略接口
+    interface FileOpenStrategy {
+        fun open(file: File, relativePath: String)
+    }
+
+    // HTML 文件的处理策略
+    class HtmlFileOpenStrategy(private val activity: MainActivity) : FileOpenStrategy {
+        override fun open(file: File, relativePath: String) {
+            activity.loadUrl("http://localhost:8080/$relativePath")
+            activity.currentFileBrowserDialog?.dismiss()
+        }
+    }
 
     private val reauthorizeFolderLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -348,7 +362,6 @@ class MainActivity : AppCompatActivity(), DebugLogger {
             log(message)
         }
         initInstancesUI()
-        PrivateDirDocumentsProvider.init(this)
 
         rootFrame.post {
             measureOriginalHeights()
@@ -1088,19 +1101,7 @@ class MainActivity : AppCompatActivity(), DebugLogger {
             Toast.makeText(this, "当前服务器根目录不存在", Toast.LENGTH_SHORT).show()
             return
         }
-        PrivateDirDocumentsProvider.setCurrentRootDirectory(this, serverRoot)  // 传入 context
-        val rootUri = PrivateDirDocumentsProvider.getRootDocumentUri(this)
-        if (rootUri == null) {
-            Toast.makeText(this, "无法获取私有目录 URI", Toast.LENGTH_SHORT).show()
-            return
-        }
-        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-            addCategory(Intent.CATEGORY_OPENABLE)
-            type = "text/html"
-            putExtra(DocumentsContract.EXTRA_INITIAL_URI, rootUri)
-        }
-        htmlFilePickerLauncher.launch(intent)
-        log("服务器根目录: ${serverRoot.absolutePath}")
+        showFileBrowser(serverRoot)
     }
 
     private fun loadUserInputUrl(input: String) {
@@ -1174,6 +1175,7 @@ class MainActivity : AppCompatActivity(), DebugLogger {
         cleanupUnzippedDir()
         copyJob?.cancel()
         copyProgressDialog?.dismiss()
+        currentFileBrowserDialog?.dismiss()
     }
 
     private fun setStatusBarColor(color: Int) {
@@ -1666,33 +1668,6 @@ class MainActivity : AppCompatActivity(), DebugLogger {
         onComplete?.invoke()
     }
 
-    // 用于 ZIP 解压模式下通过 DocumentsProvider 选择 HTML 文件
-    private val htmlFilePickerLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-
-        if (result.resultCode == Activity.RESULT_OK) {
-            val uri = result.data?.data
-            if (uri != null) {
-                contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                val selectedFile = PrivateDirDocumentsProvider.getFileFromUri(uri)
-                if (selectedFile != null && selectedFile.exists() && selectedFile.isFile) {
-                    val serverRoot = currentInstanceRootDir ?: unzippedDir
-                    if (serverRoot == null) {
-                        Toast.makeText(this, "服务器根目录未设置", Toast.LENGTH_SHORT).show()
-                        return@registerForActivityResult
-                    }
-                    val relativePath = if (selectedFile.absolutePath.startsWith(serverRoot.absolutePath)) {
-                        selectedFile.absolutePath.substring(serverRoot.absolutePath.length + 1)
-                    } else {
-                        selectedFile.name
-                    }
-                    loadUrl("http://localhost:8080/$relativePath")
-                } else {
-                    Toast.makeText(this, "无法访问该文件", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
-    }
-
     private fun cleanupUnzippedDir() {
         if (::unzippedDir.isInitialized && unzippedDir.exists()) {
             try {
@@ -1987,7 +1962,7 @@ class MainActivity : AppCompatActivity(), DebugLogger {
         }
     }
 
-    // 加载实例（简化版，步骤六会完善，目前先实现基本切换）
+    // 加载实例
     private fun loadInstance(instance: Instance) {
         stopServerOnly()
 
@@ -2141,5 +2116,136 @@ class MainActivity : AppCompatActivity(), DebugLogger {
                     .show()
             }
             .show()
+    }
+
+    private fun showFileBrowser(rootDir: File) {
+        if (!rootDir.exists()) {
+            Toast.makeText(this, "目录不存在", Toast.LENGTH_SHORT).show()
+            return
+        }
+        currentBrowserRoot = rootDir
+        currentBrowserCurrentDir = rootDir
+
+        val dialogView = layoutInflater.inflate(R.layout.dialog_file_browser, null)
+        val recyclerView = dialogView.findViewById<RecyclerView>(R.id.fileRecyclerView)
+        val pathText = dialogView.findViewById<TextView>(R.id.currentPathText)
+        val closeButton = dialogView.findViewById<ImageButton>(R.id.closeFileBrowserButton)
+        val backButton = dialogView.findViewById<ImageButton>(R.id.backButton)
+        val titleBar = dialogView.findViewById<LinearLayout>(R.id.titleBar)
+
+        // 根据夜间模式设置颜色
+        val bgColor = if (isNightMode) Color.parseColor("#FF333333") else Color.WHITE
+        val titleBarColor = if (isNightMode) Color.BLACK else Color.parseColor("#F5F5F5")
+        val textColor = if (isNightMode) Color.WHITE else Color.BLACK
+        val iconColor = if (isNightMode) Color.WHITE else Color.BLACK
+
+        dialogView.setBackgroundColor(bgColor)
+        titleBar.setBackgroundColor(titleBarColor)
+        pathText.setTextColor(textColor)
+
+        backButton.drawable?.setColorFilter(iconColor, PorterDuff.Mode.SRC_IN)
+        closeButton.drawable?.setColorFilter(iconColor, PorterDuff.Mode.SRC_IN)
+
+        lateinit var adapter: FileBrowserAdapter
+
+        fun refreshFileList() {
+            val files = currentBrowserCurrentDir?.listFiles()
+                ?.sortedWith(compareBy<File> { !it.isDirectory }.thenBy { it.name })
+                ?: emptyList()
+            adapter.updateItems(files)
+            val displayPath = when {
+                currentBrowserCurrentDir?.absolutePath == currentBrowserRoot?.absolutePath -> "根目录"
+                else -> currentBrowserCurrentDir?.name ?: ""
+            }
+            pathText.text = displayPath
+        }
+
+        adapter = FileBrowserAdapter(emptyList()) { file ->
+            when {
+                file.isDirectory -> {
+                    currentBrowserCurrentDir = file
+                    refreshFileList()
+                }
+                file.isFile -> {
+                    val relativePath = getRelativePathForFile(file)
+                    val strategy = getFileOpenStrategy(file)
+                    strategy?.open(file, relativePath)
+                        ?: Toast.makeText(this, "不支持的文件类型", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+        adapter.nightMode = isNightMode
+
+        recyclerView.layoutManager = LinearLayoutManager(this)
+        recyclerView.adapter = adapter
+
+        closeButton.setOnClickListener {
+            currentFileBrowserDialog?.dismiss()
+        }
+
+        backButton.setOnClickListener {
+            if (currentBrowserCurrentDir?.absolutePath != currentBrowserRoot?.absolutePath) {
+                currentBrowserCurrentDir = currentBrowserCurrentDir?.parentFile
+                refreshFileList()
+            } else {
+                Toast.makeText(this, "已在根目录", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        pathText.setOnClickListener {
+            if (currentBrowserCurrentDir?.absolutePath != currentBrowserRoot?.absolutePath) {
+                currentBrowserCurrentDir = currentBrowserCurrentDir?.parentFile
+                refreshFileList()
+            } else {
+                Toast.makeText(this, "已在根目录", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        refreshFileList()
+        val dialog = AlertDialog.Builder(this)
+            .setView(dialogView)
+            .setCancelable(true)
+            .create()
+        dialog.show()
+
+        // 限制最大高度为屏幕高度的80%（兼容所有API）
+        dialogView.viewTreeObserver.addOnGlobalLayoutListener(object : ViewTreeObserver.OnGlobalLayoutListener {
+            override fun onGlobalLayout() {
+                dialogView.viewTreeObserver.removeOnGlobalLayoutListener(this)
+                val maxHeight = (resources.displayMetrics.heightPixels * 0.8).toInt()
+                if (dialogView.height > maxHeight) {
+                    val params = dialogView.layoutParams
+                    params.height = maxHeight
+                    dialogView.layoutParams = params
+                }
+            }
+        })
+
+        dialog.window?.setLayout(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        )
+
+        currentFileBrowserDialog = dialog
+    }
+
+    private fun getRelativePathForFile(file: File): String {
+        val serverRoot = currentInstanceRootDir ?: unzippedDir
+        return if (file.absolutePath.startsWith(serverRoot.absolutePath)) {
+            file.absolutePath.substring(serverRoot.absolutePath.length + 1)
+        } else {
+            file.name
+        }
+    }
+
+    private fun getFileOpenStrategy(file: File): FileOpenStrategy? {
+        val extension = file.extension.lowercase()
+        return when (extension) {
+            "html", "htm" -> HtmlFileOpenStrategy(this)
+            // 未来可添加其他扩展名：
+            // "txt" -> TextFileOpenStrategy(this)
+            // "png", "jpg" -> ImageFileOpenStrategy(this)
+            else -> null
+        }
     }
 }
